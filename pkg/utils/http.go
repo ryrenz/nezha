@@ -166,6 +166,20 @@ func HTTPURLTargetIPAllowed(ip net.IP) bool {
 	if !ok {
 		return false
 	}
+	// Loopback is exempt. This list denies reachability an operator did not
+	// intend to grant, and loopback grants none: a webhook aimed at 127.0.0.1
+	// can only reach a process on the same machine as the dashboard, which
+	// whoever configured it already controls. Meanwhile every private range is
+	// blocked, so without this a self-hosted panel has no way at all to deliver
+	// through a relay on its own host -- and the panel ships no delivery
+	// channel of its own, only this webhook.
+	//
+	// Everything else, including the rest of RFC1918 and the CGNAT range Tailscale
+	// uses, stays blocked: those can reach neighbours, and a neighbour is exactly
+	// what GHSA-6x26-5727-rrm9 was about.
+	if parsedIP.IsLoopback() {
+		return true
+	}
 	for _, cidr := range blockedHTTPClientCIDRs {
 		if cidr.Contains(parsedIP) {
 			return false

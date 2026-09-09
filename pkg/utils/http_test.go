@@ -21,6 +21,16 @@ func TestHTTPURLTargetIPAllowed(t *testing.T) {
 		{name: "local-use NAT64", address: "64:ff9b:1::a9fe:a9fe", allowed: false},
 		{name: "6to4 public IPv4 embedding", address: "2002:0101:0101::1", allowed: false},
 		{name: "6to4 link-local IPv4 embedding", address: "2002:a9fe:a9fe::1", allowed: false},
+		// A relay on the dashboard's own host is the only delivery path a
+		// self-hosted panel has, since every private range below stays blocked.
+		{name: "IPv4 loopback", address: "127.0.0.1", allowed: true},
+		{name: "IPv4 loopback, non-canonical", address: "127.9.9.9", allowed: true},
+		{name: "IPv6 loopback", address: "::1", allowed: true},
+		{name: "IPv4-mapped loopback", address: "::ffff:127.0.0.1", allowed: true},
+		// Still denied: these reach neighbours, not just this machine.
+		{name: "RFC1918", address: "192.168.1.1", allowed: false},
+		{name: "CGNAT / Tailscale", address: "100.97.177.54", allowed: false},
+		{name: "link-local", address: "169.254.169.254", allowed: false},
 	}
 
 	for _, test := range tests {
