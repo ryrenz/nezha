@@ -334,3 +334,37 @@ func TestLoadMonthlyStatusFromTSDB_NoDoubleCountToday(t *testing.T) {
 
 	assert.Equal(t, totalAfterMonthly+ss.serviceStatusToday[serviceID].Up, totalAfterToday)
 }
+
+func TestServiceStateCode(t *testing.T) {
+	tests := []struct {
+		name string
+		up   uint64
+		down uint64
+		want uint8
+	}{
+		// The window is empty only before anything has been probed. That is the
+		// one case NoData is actually about.
+		{name: "nothing probed yet", up: 0, down: 0, want: StatusNoData},
+
+		// Everything probed has failed. Before this function existed these
+		// landed on NoData and notifyCheck stayed silent, so a completely dead
+		// service was the one thing that never alerted.
+		{name: "all failed, below threshold", up: 0, down: 1, want: StatusNoData},
+		{name: "all failed, at threshold", up: 0, down: _MinDownSamplesForOutage, want: StatusDown},
+		{name: "all failed, full window", up: 0, down: _CurrentStatusSize, want: StatusDown},
+
+		// Unchanged behaviour: a mixed window is scored by percentage.
+		{name: "one failure in a healthy window", up: 29, down: 1, want: StatusGood},
+		{name: "ninety percent up", up: 9, down: 1, want: StatusLowAvailability},
+		{name: "half up", up: 5, down: 5, want: StatusDown},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := serviceStateCode(test.up, test.down); got != test.want {
+				t.Fatalf("serviceStateCode(up=%d, down=%d) = %d, want %d",
+					test.up, test.down, got, test.want)
+			}
+		})
+	}
+}

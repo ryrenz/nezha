@@ -23,6 +23,13 @@ import (
 
 const (
 	_CurrentStatusSize = 30 // 统计 15 分钟内的数据为当前状态
+
+	// How many all-failed samples in the current window before a service is
+	// called down rather than "no data". The window takes one sample per 30s,
+	// so this costs about a minute of detection latency and buys immunity to a
+	// single failed probe -- which matters most right after a restart, when the
+	// window is nearly empty.
+	_MinDownSamplesForOutage = 3
 )
 
 type serviceResponseItem struct {
@@ -697,15 +704,8 @@ func (ss *ServiceSentinel) processReport(r ReportData, serverShared *ServerClass
 	}
 
 	// 计算在线率，
-	var stateCode uint8
-	{
-		upPercent := uint64(0)
-		rd := ss.serviceResponseDataStore[mh.GetId()]
-		if rd.Down+rd.Up > 0 {
-			upPercent = rd.Up * 100 / (rd.Down + rd.Up)
-		}
-		stateCode = GetStatusCode(upPercent)
-	}
+	rd := ss.serviceResponseDataStore[mh.GetId()]
+	stateCode := serviceStateCode(rd.Up, rd.Down)
 
 	if len(serviceCurrentStatusData.result) == _CurrentStatusSize {
 		serviceCurrentStatusData.t = currentTime
@@ -888,6 +888,27 @@ const (
 	StatusLowAvailability
 	StatusDown
 )
+
+// serviceStateCode turns a window of successes and failures into a status.
+//
+// GetStatusCode alone cannot: an up-percentage of exactly zero reaches it from
+// two very different places -- nothing has been probed yet, and every probe
+// failed -- and it answers NoData for both. notifyCheck never fires on NoData,
+// so a service failing 100% of its probes stayed completely silent while a
+// half-broken one alerted. Going from up to dead was always caught, by the
+// lastStatus != 0 arm; being dead across a dashboard restart was caught by
+// nothing at all.
+func serviceStateCode(up, down uint64) uint8 {
+	upPercent := uint64(0)
+	if down+up > 0 {
+		upPercent = up * 100 / (down + up)
+	}
+	code := GetStatusCode(upPercent)
+	if code == StatusNoData && down >= _MinDownSamplesForOutage {
+		return StatusDown
+	}
+	return code
+}
 
 func GetStatusCode[T constraints.Float | constraints.Integer](percent T) uint8 {
 	if percent == 0 {
