@@ -105,11 +105,29 @@ type ServiceSentinel struct {
 	// restoring globals.
 	closeOnce sync.Once
 	workerWG  sync.WaitGroup
+
+	// When this sentinel started. Notifications are held back briefly after
+	// that -- see notifyGracePeriod.
+	startedAt time.Time
 }
+
+// notifyGracePeriod is how long after startup service notifications are held
+// back. The status window fills at one sample per 30s, so immediately after a
+// restart a handful of samples decide the state, and every service walks
+// through an intermediate reading on its way to steady state. Each of those
+// walks is a state change, and each state change is an email: one dashboard
+// restart produced eight "recovered" notices for services that had never been
+// down.
+//
+// Six samples is enough for the window to mean something, and it still lets a
+// genuinely dead service alert -- three failed samples is the outage threshold,
+// so it will have crossed it by the time this expires.
+const notifyGracePeriod = 3 * time.Minute
 
 // NewServiceSentinel 创建服务监控器
 func NewServiceSentinel(serviceSentinelDispatchBus chan<- *model.Service) (*ServiceSentinel, error) {
 	ss := &ServiceSentinel{
+		startedAt:                time.Now(),
 		serviceReportChannel:     make(chan ReportData, 200),
 		serviceStatusToday:       make(map[uint64]*_TodayStatsOfService),
 		serviceCurrentStatusData: make(map[uint64]*serviceTaskStatus),
@@ -735,7 +753,12 @@ func (ss *ServiceSentinel) processReport(r ReportData, serverShared *ServerClass
 		// 存储新的状态值
 		serviceCurrentStatusData.lastStatus = stateCode
 
-		notifyCheck(&r, m, cs, mh, lastStatus, stateCode)
+		// The state still advances during the grace period, so the first real
+		// change after it expires is judged against a settled baseline rather
+		// than against zero.
+		if time.Since(ss.startedAt) >= notifyGracePeriod {
+			notifyCheck(&r, m, cs, mh, lastStatus, stateCode)
+		}
 	}
 
 	// TLS 证书报警
