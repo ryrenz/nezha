@@ -56,6 +56,12 @@ type serviceTaskStatus struct {
 	lastStatus uint8
 	t          time.Time
 	result     []*pb.TaskResult
+
+	// When this service last produced a notification. See notifyCooldown.
+	lastNotifiedAt time.Time
+	// State changes swallowed by the cooldown, reported with the next one that
+	// gets through so the silence is accounted for rather than invisible.
+	suppressedSinceNotify int
 }
 
 type pingStore struct {
@@ -123,6 +129,21 @@ type ServiceSentinel struct {
 // genuinely dead service alert -- three failed samples is the outage threshold,
 // so it will have crossed it by the time this expires.
 const notifyGracePeriod = 3 * time.Minute
+
+// notifyCooldown is the shortest interval between two notifications about the
+// same service.
+//
+// A service that is genuinely half-broken does not fail cleanly: it walks
+// Good -> LowAvailability -> Down -> Good -> Down, and every step is a state
+// change. One such site produced 77 of the 98 alert mails sent in a day, which
+// is worse than sending none -- mail that is reliably meaningless teaches you
+// to archive the whole thread unread, including the one that mattered.
+//
+// A cooldown caps the rate without hiding anything: the dashboard is always
+// current, the next change after the window still notifies, and the count of
+// changes that were swallowed rides along with it so the flapping itself is
+// visible.
+const notifyCooldown = 30 * time.Minute
 
 // NewServiceSentinel 创建服务监控器
 func NewServiceSentinel(serviceSentinelDispatchBus chan<- *model.Service) (*ServiceSentinel, error) {
@@ -757,7 +778,15 @@ func (ss *ServiceSentinel) processReport(r ReportData, serverShared *ServerClass
 		// change after it expires is judged against a settled baseline rather
 		// than against zero.
 		if time.Since(ss.startedAt) >= notifyGracePeriod {
-			notifyCheck(&r, m, cs, mh, lastStatus, stateCode)
+			if serviceCurrentStatusData.lastNotifiedAt.IsZero() ||
+				time.Since(serviceCurrentStatusData.lastNotifiedAt) >= notifyCooldown {
+				suppressed := serviceCurrentStatusData.suppressedSinceNotify
+				serviceCurrentStatusData.lastNotifiedAt = time.Now()
+				serviceCurrentStatusData.suppressedSinceNotify = 0
+				notifyCheck(&r, m, cs, mh, lastStatus, stateCode, suppressed)
+			} else {
+				serviceCurrentStatusData.suppressedSinceNotify++
+			}
 		}
 	}
 
@@ -868,7 +897,7 @@ func delayCheck(r *ReportData, m map[uint64]*model.Server, ss *model.Service, mh
 }
 
 func notifyCheck(r *ReportData, m map[uint64]*model.Server,
-	ss *model.Service, mh *pb.TaskResult, lastStatus, stateCode uint8) {
+	ss *model.Service, mh *pb.TaskResult, lastStatus, stateCode uint8, suppressed int) {
 	// GHSA-jx78-55p5-rwv5: guard against concurrent server deletion (same TOCTOU
 	// class as the 2026-07-21 fix, a few dozen lines lower in the same worker).
 	// ServerShared has its own lock; m is a snapshot taken outside
@@ -881,6 +910,13 @@ func notifyCheck(r *ReportData, m map[uint64]*model.Server,
 	if isNeedSendNotification && reporterServer != nil {
 		notificationGroupID := ss.NotificationGroupID
 		notificationMsg := Localizer.Tf("[%s] %s Reporter: %s, Error: %s", StatusCodeToString(stateCode), ss.Name, reporterServer.Name, mh.Data)
+		// Say so when a run of changes was swallowed: a service that flaps is
+		// broken in its own way, and hiding that is how a cooldown turns into
+		// a blind spot.
+		if suppressed > 0 {
+			notificationMsg += fmt.Sprintf(" (+%d state change(s) suppressed in the last %s)",
+				suppressed, notifyCooldown)
+		}
 		muteLabel := NotificationMuteLabel.ServiceStateChanged(mh.GetId())
 
 		// 状态变更时，清除静音缓存
